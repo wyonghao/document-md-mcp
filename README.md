@@ -48,6 +48,8 @@ Arguments:
 - `overwrite`: replace existing markdown/manifest/images when true
 - `pdf_image_strategy`: `embedded`, `pages`, or `both`; defaults to `both`
 - `pdf_page_dpi`: DPI used when rendering PDF pages; defaults to `180`
+- `max_image_dimension`: max width/height for extracted images; defaults to `1600`
+- `convert_vector_images`: convert DOCX EMF/WMF images to PNG when possible; defaults to `true`
 
 Returns a JSON object with output paths and image metadata.
 
@@ -68,3 +70,5 @@ C:\docs\examplemd\
 ```
 
 For PDFs, rendered pages are named `page001.png`, `page002.png`, and embedded images are named like `page001-image001.png`.
+
+DOCX vector images such as EMF/WMF are converted to PNG by default when Pillow can render them. This is usually better for AI vision ingestion and avoids sending large Office vector files.

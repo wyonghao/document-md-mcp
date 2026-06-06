@@ -7,11 +7,13 @@ import re
 import shutil
 import stat
 import time
+from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import fitz
+from PIL import Image
 from docx import Document
 from docx.document import Document as DocxDocument
 from docx.oxml.ns import qn
@@ -180,7 +182,95 @@ def _docx_image_extension(blob: bytes, content_type: str | None) -> str:
     return ".bin"
 
 
-def _convert_docx(paths: ConversionPaths) -> dict[str, Any]:
+def _image_ext_from_content_type(content_type: str | None) -> str:
+    if not content_type:
+        return ".bin"
+    ext = mimetypes.guess_extension(content_type)
+    if not ext:
+        return ".bin"
+    return ".jpg" if ext == ".jpe" else ext
+
+
+def _save_processed_image(
+    blob: bytes,
+    content_type: str | None,
+    output_stem: Path,
+    max_image_dimension: int,
+    convert_vector_images: bool,
+) -> dict[str, Any]:
+    original_ext = _docx_image_extension(blob, content_type)
+    original_size_bytes = len(blob)
+    image_info: dict[str, Any] = {
+        "original_content_type": content_type,
+        "original_extension": original_ext,
+        "original_size_bytes": original_size_bytes,
+    }
+
+    try:
+        with Image.open(BytesIO(blob)) as image:
+            original_width, original_height = image.size
+            image_info["original_width"] = original_width
+            image_info["original_height"] = original_height
+            image_info["original_format"] = image.format
+
+            is_vector = original_ext.lower() in {".emf", ".wmf"} or image.format == "WMF"
+            should_convert_to_png = is_vector and convert_vector_images
+            should_resize = max_image_dimension > 0 and max(image.size) > max_image_dimension
+
+            if should_convert_to_png or should_resize:
+                processed = image.convert("RGBA" if image.mode in {"RGBA", "LA", "P"} else "RGB")
+                if should_resize:
+                    processed.thumbnail((max_image_dimension, max_image_dimension), Image.Resampling.LANCZOS)
+
+                if should_convert_to_png or processed.mode == "RGBA":
+                    output_path = output_stem.with_suffix(".png")
+                    processed.save(output_path, format="PNG", optimize=True)
+                    output_content_type = "image/png"
+                else:
+                    output_path = output_stem.with_suffix(original_ext)
+                    save_format = "JPEG" if original_ext.lower() in {".jpg", ".jpeg"} else image.format
+                    save_kwargs: dict[str, Any] = {"optimize": True}
+                    if save_format == "JPEG":
+                        save_kwargs["quality"] = 85
+                    processed.save(output_path, format=save_format, **save_kwargs)
+                    output_content_type = content_type
+
+                image_info.update(
+                    {
+                        "path": str(output_path),
+                        "content_type": output_content_type,
+                        "width": processed.width,
+                        "height": processed.height,
+                        "size_bytes": output_path.stat().st_size,
+                        "resized": should_resize,
+                        "converted": should_convert_to_png,
+                    }
+                )
+                return image_info
+    except Exception as error:
+        image_info["processing_error"] = f"{type(error).__name__}: {error}"
+
+    output_path = output_stem.with_suffix(original_ext)
+    output_path.write_bytes(blob)
+    image_info.update(
+        {
+            "path": str(output_path),
+            "content_type": content_type,
+            "width": image_info.get("original_width"),
+            "height": image_info.get("original_height"),
+            "size_bytes": output_path.stat().st_size,
+            "resized": False,
+            "converted": False,
+        }
+    )
+    return image_info
+
+
+def _convert_docx(
+    paths: ConversionPaths,
+    max_image_dimension: int,
+    convert_vector_images: bool,
+) -> dict[str, Any]:
     doc = Document(str(paths.source))
     image_counter = 0
     images: list[dict[str, Any]] = []
@@ -189,28 +279,41 @@ def _convert_docx(paths: ConversionPaths) -> dict[str, Any]:
     def extract_run_images(run) -> list[str]:
         nonlocal image_counter
         links: list[str] = []
-        blips = run._element.xpath(".//a:blip")
-        for blip in blips:
-            rel_id = blip.get(qn("r:embed")) or blip.get(qn("r:link"))
+        image_refs = []
+        for blip in run._element.xpath(".//a:blip"):
+            image_refs.append(("drawingml", blip.get(qn("r:embed")) or blip.get(qn("r:link"))))
+        for image_data in run._element.xpath('.//*[local-name()="imagedata"]'):
+            image_refs.append(("vml", image_data.get(qn("r:id"))))
+
+        seen_rel_ids: set[str] = set()
+        for source_markup, rel_id in image_refs:
             if not rel_id or rel_id not in doc.part.related_parts:
                 continue
+            if rel_id in seen_rel_ids:
+                continue
+            seen_rel_ids.add(rel_id)
             part = doc.part.related_parts[rel_id]
             blob = part.blob
             image_counter += 1
-            ext = _docx_image_extension(blob, getattr(part, "content_type", None))
-            image_path = paths.image_dir / f"image{image_counter:03d}{ext}"
-            image_path.write_bytes(blob)
+            image_info = _save_processed_image(
+                blob=blob,
+                content_type=getattr(part, "content_type", None),
+                output_stem=paths.image_dir / f"image{image_counter:03d}",
+                max_image_dimension=max_image_dimension,
+                convert_vector_images=convert_vector_images,
+            )
+            image_path = Path(image_info["path"])
             rel_link = _relative_markdown_link(image_path, paths.markdown)
             links.append(f"![image {image_counter}]({rel_link})")
-            images.append(
+            image_info.update(
                 {
                     "kind": "embedded",
-                    "path": str(image_path),
                     "markdown_path": rel_link,
-                    "content_type": getattr(part, "content_type", None),
                     "source_relation_id": rel_id,
+                    "source_markup": source_markup,
                 }
             )
+            images.append(image_info)
         return links
 
     for block in _iter_docx_blocks(doc):
@@ -358,6 +461,8 @@ def convert_document(
     overwrite: bool = False,
     pdf_image_strategy: PdfImageStrategy = "both",
     pdf_page_dpi: int = 180,
+    max_image_dimension: int = 1600,
+    convert_vector_images: bool = True,
 ) -> dict[str, Any]:
     """Convert a DOCX or PDF into Markdown, images, and a manifest JSON file."""
     paths = _paths_for(input_path, output_dir)
@@ -367,7 +472,7 @@ def convert_document(
 
     _prepare_output(paths, overwrite)
     if suffix == ".docx":
-        return _convert_docx(paths)
+        return _convert_docx(paths, max_image_dimension, convert_vector_images)
     return _convert_pdf(paths, pdf_image_strategy, pdf_page_dpi)
 
 
