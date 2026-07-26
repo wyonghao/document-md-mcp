@@ -8,6 +8,23 @@ MCP server that converts Word and PDF documents into:
 
 This is meant for ingestion pipelines where the LLM reads Markdown text and a vision model reads the extracted images.
 
+## Comparison with Built-in Copilot CLI `document-md`
+
+| Feature | Built-in `document-md` | This server |
+|---|---|---|
+| DOCX → Markdown | ✅ | ✅ |
+| PDF → Markdown | ✅ | ✅ |
+| Image extraction | Basic | ✅ Full — PNG/JPEG extracted to side folder |
+| EMF/WMF vector images | ❌ | ✅ Converts to PNG automatically |
+| Image resizing | ❌ | ✅ Max 1600 px (configurable) |
+| Manifest JSON | ❌ | ✅ Tracks all output files and metadata |
+| Vision model workflow | ❌ | ✅ Explicit text + image separation |
+| PDF page rendering | Unknown | ✅ Configurable DPI rendering |
+
+**Key advantage:** Word documents often contain diagrams, arrows, and figures stored as EMF/WMF vector files. The built-in server drops or mishandles these; this server converts them to PNG so a vision model can read them correctly. This makes it significantly better for technical document ingestion pipelines (e.g. engineering specs, standards documents with embedded figures).
+
+---
+
 ## Why This Exists
 
 Many AI agents can read plain text files well, but they often handle Word and PDF files inconsistently. DOCX files are especially tricky because important visual content may be stored as:

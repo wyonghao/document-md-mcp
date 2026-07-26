@@ -273,11 +273,12 @@ def _convert_docx(
 ) -> dict[str, Any]:
     doc = Document(str(paths.source))
     image_counter = 0
+    seen_rel_ids: set[str] = set()
     images: list[dict[str, Any]] = []
     lines: list[str] = [f"# {paths.source.stem}", ""]
 
     def extract_run_images(run) -> list[str]:
-        nonlocal image_counter
+        nonlocal image_counter, seen_rel_ids
         links: list[str] = []
         image_refs = []
         for blip in run._element.xpath(".//a:blip"):
@@ -285,7 +286,6 @@ def _convert_docx(
         for image_data in run._element.xpath('.//*[local-name()="imagedata"]'):
             image_refs.append(("vml", image_data.get(qn("r:id"))))
 
-        seen_rel_ids: set[str] = set()
         for source_markup, rel_id in image_refs:
             if not rel_id or rel_id not in doc.part.related_parts:
                 continue
@@ -329,7 +329,15 @@ def _convert_docx(
         elif isinstance(block, Table):
             rows = []
             for row in block.rows:
-                rows.append([_markdown_escape_cell(cell.text.strip()) for cell in row.cells])
+                cell_texts = []
+                for cell in row.cells:
+                    cell_content = []
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            cell_content.append(_format_run_text(run.text, run.bold, run.italic))
+                            cell_content.extend(extract_run_images(run))
+                    cell_texts.append(_markdown_escape_cell("".join(cell_content).strip()))
+                rows.append(cell_texts)
             if rows:
                 width = max(len(row) for row in rows)
                 normalized = [row + [""] * (width - len(row)) for row in rows]
